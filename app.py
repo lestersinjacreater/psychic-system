@@ -538,3 +538,5 @@ st.caption(
     f"Processed {len(output_df)} rows against {len(bic_directory):,} directory codes "
     f"in {elapsed:.2f} seconds."
 )
+
+/*.streamlit/secrets.toml
