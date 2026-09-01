@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,10 @@ st.set_page_config(
 )
 
 
-DIRECTORY_PATH = Path(__file__).with_name("bic_directory.csv")
+BASE_DIR = Path(__file__).resolve().parent
+JSON_DIRECTORY_PATH = BASE_DIR / "bic_directory.json"
+CSV_DIRECTORY_PATH = BASE_DIR / "bic_directory.csv"
+DIRECTORY_PATH = JSON_DIRECTORY_PATH if JSON_DIRECTORY_PATH.exists() else CSV_DIRECTORY_PATH
 BIC_RE = re.compile(r"^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$")
 PUNCTUATION_RE = re.compile(r"[.,\-–—/\\&()'+]+")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -67,13 +71,98 @@ if "lookup_cache" not in st.session_state:
     st.session_state.lookup_cache = {}
 
 
+def _normalise_directory_code(value: object) -> str:
+    return str(value).strip().upper().replace(" ", "")[:8]
+
+
+def _normalise_directory_name(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _extract_lookup_from_json_object(obj: object) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    if not isinstance(obj, dict):
+        return lookup
+
+    if "swift" in obj and "official_bank_name" in obj:
+        code = _normalise_directory_code(obj.get("swift"))
+        name = _normalise_directory_name(obj.get("official_bank_name"))
+        if len(code) == 8 and name:
+            lookup[code] = name
+        return lookup
+
+    if "properties" in obj and isinstance(obj["properties"], dict):
+        props = obj["properties"]
+        names = props.get("name")
+        bics = props.get("swiftBic")
+        if isinstance(names, list):
+            name_value = names[0] if names else ""
+        else:
+            name_value = names or ""
+        if isinstance(bics, list):
+            code_values = bics
+        elif bics is not None:
+            code_values = [bics]
+        else:
+            code_values = []
+        for code in code_values:
+            normalised = _normalise_directory_code(code)
+            if len(normalised) == 8 and name_value:
+                lookup[normalised] = _normalise_directory_name(name_value)
+        return lookup
+
+    for key, value in obj.items():
+        if isinstance(value, (str, int, float)):
+            code = _normalise_directory_code(key)
+            name = _normalise_directory_name(value)
+            if len(code) == 8 and name:
+                lookup[code] = name
+    return lookup
+
+
+def _read_json_directory(file_path: Path) -> dict[str, str]:
+    text = file_path.read_text(encoding="utf-8")
+    stripped = text.strip()
+    if not stripped:
+        return {}
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        records = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+        payload = records
+
+    lookup: dict[str, str] = {}
+    if isinstance(payload, dict):
+        lookup.update(_extract_lookup_from_json_object(payload))
+    elif isinstance(payload, list):
+        for item in payload:
+            lookup.update(_extract_lookup_from_json_object(item))
+    else:
+        raise ValueError(f"Unsupported JSON directory format in {file_path.name}")
+
+    return lookup
+
+
 @st.cache_data(show_spinner=False)
 def load_bic_directory(path: str) -> dict[str, str]:
     file_path = Path(path)
     if not file_path.exists():
         return {}
 
-    df = pd.read_csv(file_path, dtype=str).fillna("")
+    if file_path.suffix.lower() in {".json", ".ndjson"}:
+        return _read_json_directory(file_path)
+
+    try:
+        df = pd.read_csv(file_path, dtype=str).fillna("")
+    except pd.errors.ParserError:
+        return _read_json_directory(file_path)
+
     required = {"swift", "official_bank_name"}
     if not required.issubset(set(df.columns)):
         raise ValueError(
@@ -82,8 +171,8 @@ def load_bic_directory(path: str) -> dict[str, str]:
 
     lookup = {}
     for _, row in df.iterrows():
-        code = str(row["swift"]).strip().upper().replace(" ", "")[:8]
-        name = str(row["official_bank_name"]).strip()
+        code = _normalise_directory_code(row["swift"])
+        name = _normalise_directory_name(row["official_bank_name"])
         if len(code) == 8 and name:
             lookup[code] = name
     return lookup
