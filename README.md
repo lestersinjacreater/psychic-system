@@ -3,12 +3,21 @@ validation of banks
 
 ## Required setup
 
-This app uses the API Ninjas SWIFT lookup endpoint and expects your key in Streamlit secrets.
+This app can use the local JSON BIC directory and will fall back to the IsValid API when a code is not found locally.
 
 Create a file at `.streamlit/secrets.toml` with:
 
 ```toml
-API_NINJAS_KEY = "YOUR_API_KEY_HERE"
+IS_VALID_API_KEY = "YOUR_API_KEY_HERE"
+```
+
+The app calls the endpoint in the format:
+
+```python
+requests.get(
+    'https://api.isvalid.dev/v0/bic?value=XASXAU2SRTG',
+    headers={'Authorization': 'Bearer YOUR_API_KEY'}
+)
 ```
 
 Then run:

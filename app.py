@@ -242,24 +242,24 @@ def normalise_swift(value: str) -> tuple[str, str, str]:
     return cleaned, cleaned[:8], "OK"
 
 
-def get_api_ninjas_key() -> str:
+def get_isvalid_api_key() -> str:
     try:
-        value = st.secrets.get("API_NINJAS_KEY", "")
+        value = st.secrets.get("IS_VALID_API_KEY", "") or st.secrets.get("IS_VALID_KEY", "")
     except Exception:
         value = ""
     return str(value or "").strip()
 
 
 def lookup_official_name_via_api(institution_key: str) -> str:
-    api_key = get_api_ninjas_key()
+    api_key = get_isvalid_api_key()
     if not api_key or len(institution_key) != 8:
         return ""
 
+    url = f"https://api.isvalid.dev/v0/bic?value={institution_key}"
     try:
         response = requests.get(
-            "https://api.api-ninjas.com/v1/swift",
-            params={"swift": institution_key},
-            headers={"X-Api-Key": api_key},
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
             timeout=10,
         )
         if response.status_code != 200:
@@ -268,10 +268,18 @@ def lookup_official_name_via_api(institution_key: str) -> str:
         payload = response.json()
         if isinstance(payload, list):
             payload = payload[0] if payload else {}
+
+        if isinstance(payload, dict):
+            for key in ("data", "result", "bank"):
+                candidate = payload.get(key)
+                if isinstance(candidate, dict):
+                    payload = candidate
+                    break
+
         if not isinstance(payload, dict):
             return ""
 
-        for key in ("official_bank_name", "bank_name", "bank", "name", "institution"):
+        for key in ("official_bank_name", "bank_name", "name", "institution", "bank"):
             value = payload.get(key)
             if value:
                 return str(value).strip()
@@ -398,8 +406,8 @@ if input_df is None:
     st.info("Upload a sheet or paste the two columns to continue.")
     st.stop()
 
-if not bic_directory and not get_api_ninjas_key():
-    st.error("The local BIC directory is empty and no API_NINJAS_KEY is configured.")
+if not bic_directory and not get_isvalid_api_key():
+    st.error("The local BIC directory is empty and no IsValid API key is configured.")
     st.stop()
 
 input_df = input_df.copy()
