@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
 
 
@@ -241,11 +242,62 @@ def normalise_swift(value: str) -> tuple[str, str, str]:
     return cleaned, cleaned[:8], "OK"
 
 
+def get_api_ninjas_key() -> str:
+    try:
+        value = st.secrets.get("API_NINJAS_KEY", "")
+    except Exception:
+        value = ""
+    return str(value or "").strip()
+
+
+def lookup_official_name_via_api(institution_key: str) -> str:
+    api_key = get_api_ninjas_key()
+    if not api_key or len(institution_key) != 8:
+        return ""
+
+    try:
+        response = requests.get(
+            "https://api.api-ninjas.com/v1/swift",
+            params={"swift": institution_key},
+            headers={"X-Api-Key": api_key},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return ""
+
+        payload = response.json()
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if not isinstance(payload, dict):
+            return ""
+
+        for key in ("official_bank_name", "bank_name", "bank", "name", "institution"):
+            value = payload.get(key)
+            if value:
+                return str(value).strip()
+
+        for nested in ("bank", "institution"):
+            value = payload.get(nested)
+            if isinstance(value, dict):
+                for key in ("name", "official_bank_name", "bank_name"):
+                    nested_value = value.get(key)
+                    if nested_value:
+                        return str(nested_value).strip()
+    except Exception:
+        return ""
+
+    return ""
+
+
 def lookup_official_name(institution_key: str, directory: dict[str, str]) -> str:
     cached = st.session_state.lookup_cache.get(institution_key)
     if cached is not None:
         return cached
+
     name = directory.get(institution_key, "")
+    if not name:
+        name = lookup_official_name_via_api(institution_key)
+
     st.session_state.lookup_cache[institution_key] = name
     return name
 
@@ -346,8 +398,8 @@ if input_df is None:
     st.info("Upload a sheet or paste the two columns to continue.")
     st.stop()
 
-if not bic_directory:
-    st.error("The local BIC directory is empty. Check bic_directory.csv.")
+if not bic_directory and not get_api_ninjas_key():
+    st.error("The local BIC directory is empty and no API_NINJAS_KEY is configured.")
     st.stop()
 
 input_df = input_df.copy()
