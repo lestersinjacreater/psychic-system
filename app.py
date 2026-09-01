@@ -539,4 +539,3 @@ st.caption(
     f"in {elapsed:.2f} seconds."
 )
 
-/*.streamlit/secrets.toml
