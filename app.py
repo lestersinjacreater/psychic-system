@@ -70,6 +70,10 @@ SWIFT_HEADERS = {
 
 if "lookup_cache" not in st.session_state:
     st.session_state.lookup_cache = {}
+if "lookup_sources" not in st.session_state:
+    st.session_state.lookup_sources = {}
+if "api_lookup_log" not in st.session_state:
+    st.session_state.api_lookup_log = []
 
 
 def _normalise_directory_code(value: object) -> str:
@@ -256,58 +260,87 @@ def lookup_official_name_via_api(institution_key: str) -> str:
         return ""
 
     url = f"https://api.isvalid.dev/v0/bic?value={institution_key}"
+    lookup_result = ""
+    status_code = None
+    success = False
     try:
         response = requests.get(
             url,
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=10,
         )
+        status_code = response.status_code
         if response.status_code != 200:
-            return ""
+            lookup_result = ""
+        else:
+            payload = response.json()
+            if isinstance(payload, list):
+                payload = payload[0] if payload else {}
 
-        payload = response.json()
-        if isinstance(payload, list):
-            payload = payload[0] if payload else {}
+            if isinstance(payload, dict):
+                for key in ("data", "result", "bank"):
+                    candidate = payload.get(key)
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                        break
 
-        if isinstance(payload, dict):
-            for key in ("data", "result", "bank"):
-                candidate = payload.get(key)
-                if isinstance(candidate, dict):
-                    payload = candidate
-                    break
+            if not isinstance(payload, dict):
+                lookup_result = ""
+            else:
+                for key in ("official_bank_name", "bank_name", "name", "institution", "bank"):
+                    value = payload.get(key)
+                    if value:
+                        lookup_result = str(value).strip()
+                        success = True
+                        break
 
-        if not isinstance(payload, dict):
-            return ""
-
-        for key in ("official_bank_name", "bank_name", "name", "institution", "bank"):
-            value = payload.get(key)
-            if value:
-                return str(value).strip()
-
-        for nested in ("bank", "institution"):
-            value = payload.get(nested)
-            if isinstance(value, dict):
-                for key in ("name", "official_bank_name", "bank_name"):
-                    nested_value = value.get(key)
-                    if nested_value:
-                        return str(nested_value).strip()
+                if not success:
+                    for nested in ("bank", "institution"):
+                        value = payload.get(nested)
+                        if isinstance(value, dict):
+                            for key in ("name", "official_bank_name", "bank_name"):
+                                nested_value = value.get(key)
+                                if nested_value:
+                                    lookup_result = str(nested_value).strip()
+                                    success = True
+                                    break
+                            if success:
+                                break
     except Exception:
-        return ""
+        lookup_result = ""
+        status_code = None
+        success = False
+    finally:
+        st.session_state.api_lookup_log = st.session_state.get("api_lookup_log", [])
+        st.session_state.api_lookup_log.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "bic": institution_key,
+                "status_code": status_code,
+                "success": success,
+                "result": lookup_result,
+            }
+        )
 
-    return ""
+    return lookup_result
 
 
-def lookup_official_name(institution_key: str, directory: dict[str, str]) -> str:
+def lookup_official_name(institution_key: str, directory: dict[str, str]) -> tuple[str, str]:
     cached = st.session_state.lookup_cache.get(institution_key)
     if cached is not None:
-        return cached
+        source = st.session_state.lookup_sources.get(institution_key, "local_directory")
+        return cached, source
 
     name = directory.get(institution_key, "")
+    source = "local_directory" if name else "api"
     if not name:
         name = lookup_official_name_via_api(institution_key)
+        if not name:
+            source = "api_not_found"
 
     st.session_state.lookup_cache[institution_key] = name
-    return name
+    st.session_state.lookup_sources[institution_key] = source
+    return name, source
 
 
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -418,6 +451,9 @@ st.dataframe(input_df, use_container_width=True, hide_index=True)
 if not st.button("Clean bank names", type="primary"):
     st.stop()
 
+st.session_state.api_lookup_log = []
+st.session_state.lookup_cache = {}
+st.session_state.lookup_sources = {}
 rows = []
 changes = []
 started = datetime.utcnow()
@@ -438,9 +474,8 @@ for index, record in input_df.iterrows():
     elif swift_state == "INVALID":
         status = "INVALID_SWIFT"
     else:
-        official_name = lookup_official_name(institution_key, bic_directory)
+        official_name, source = lookup_official_name(institution_key, bic_directory)
         if official_name:
-            source = "local_directory"
             if not original_name:
                 final_name = official_name
                 status = "FILLED"
@@ -481,14 +516,41 @@ change_log_df = pd.DataFrame(changes)
 elapsed = (datetime.utcnow() - started).total_seconds()
 
 st.header("2. Summary")
-c1, c2, c3, c4, c5 = st.columns(5)
+api_lookup_entries = st.session_state.get("api_lookup_log", [])
+api_lookup_count = len(api_lookup_entries)
+api_lookup_success = sum(1 for entry in api_lookup_entries if entry.get("success"))
+api_lookup_failures = api_lookup_count - api_lookup_success
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Rows", len(output_df))
 c2.metric("Corrected", int((output_df["status"] == "CORRECTED").sum()))
 c3.metric("Filled", int((output_df["status"] == "FILLED").sum()))
 c4.metric("Already correct", int((output_df["status"] == "CORRECT").sum()))
 c5.metric("Not in directory", int((output_df["status"] == "NOT IN DIRECTORY").sum()))
+c6.metric("API lookups", api_lookup_count)
 
-st.header("3. Results")
+if api_lookup_count:
+    st.caption(
+        f"External API lookups attempted: {api_lookup_count}. "
+        f"Successful responses: {api_lookup_success}. "
+        f"Failed/empty responses: {api_lookup_failures}."
+    )
+else:
+    st.caption("No external API lookups were required for this run.")
+
+st.header("3. API log")
+if api_lookup_entries:
+    st.dataframe(
+        pd.DataFrame(api_lookup_entries)[
+            ["timestamp", "bic", "status_code", "success", "result"]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.info("No API calls were made during this processing run.")
+
+st.header("4. Results")
 st.dataframe(output_df, use_container_width=True, hide_index=True)
 
 st.header("4. Change log")
